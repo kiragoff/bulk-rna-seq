@@ -1,0 +1,529 @@
+---
+title: "RNA-Seq with Sleuth"
+output:
+  word_document: default
+  html_document: default
+editor_options:
+  chunk_output_type: console
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+Completely clear the workspace
+```{r}
+rm(list = ls(all = T))
+```
+
+Set options
+```{r set-options}
+base_dir <- "/mnt/work-drive/kira/dual-transcriptome/sleuth-all"
+wd <- setwd("/mnt/work-drive/kira/dual-transcriptome/sleuth-all")
+getwd() # prints the working directory
+options(mc.cores = 8L)
+```
+
+
+Install sleuth, ballgownR, gumshoe, if needed
+```{#r install-packages}
+if (!requireNamespace("BiocManager", quietly = TRUE))
+    install.packages("BiocManager")
+BiocManager::install()
+BiocManager::install("devtools")    # only if devtools not yet installed
+BiocManager::install("pachterlab/sleuth")
+BiocManager::install("ballgown")
+remotes::install_github("nodrogluap/gumshoe")
+
+
+```
+
+```{r load-libraries}
+library("rhdf5")
+library("devtools")
+library("sleuth")
+library("ggplot2")
+library("gridExtra")
+library("ballgown")
+library("data.table")
+library("gumshoe")
+library("readr")
+```
+
+
+```{r define-data}
+# Get file names from folder names and print to make sure they're correct
+sample_id <- dir(file.path(base_dir, "all"))
+sample_id
+# defint result lodation based on folder names
+kal_dirs <- file.path(base_dir, "all", sample_id)
+kal_dirs
+```
+
+
+```{r import-metadata}
+s2c <- read.csv(file.path("meta.csv"), header = TRUE, stringsAsFactors = FALSE)
+s2c <- dplyr::select(s2c,
+  sample = sample,
+  exposure, time, condition,
+  replicate, chca, chca.metabolized,
+  hour, p.mapped, m.mapped,
+  n.reads, n.aligned, percent.aligned,
+  rna.conc, rin, rank.range, rank.abund,
+  cohort, sequencing.run
+)
+s2c[1:3, ]
+```
+
+add the directory path to the table and print it to make sure it worked
+```{r add-metadata}
+s2c <- dplyr::mutate(s2c, path = kal_dirs)
+s2c[1:3, ]
+```
+
+Import your file with additional gene names or functions, if desired. 
+Here I have added a variety of function and pathways to the gene call, as well as a short gene call version
+```{r import-gene-functions}
+t2g <- fread("t2g-full.tsv")
+t2g.peri <- fread("t2g-peri.tsv")
+t2g.micro <- fread("t2g-micro.tsv")
+t2g[1:3, ]
+t2g.peri[1:3, ]
+t2g.micro[1:3, ]
+```
+
+
+Make your initial sleuth object. Here I am using: 
+Filter_fun to remove low abundance transcripts. 
+I have chosen a minimum of 100 in at least 16.6% of the samples (4/24, or one set of 4 replicates)
+Default is 5+ reads in 47% of samples.
+Transformation_function: 
+to calculate Wald test b values as a log2 fold change (with a pseudo count of 0.5) 
+rather than the default ln transformation
+```{#r}
+so <- sleuth_prep(s2c, 
+      extra_bootstrap_summary = TRUE, 
+      read_bootstrap_tpm = TRUE,
+      target_mapping = t2g,
+      filter_fun=function(x){basic_filter(x,100,0.166)}, #filters transcripts with < 100 in 16.6% of samples
+      transformation_function = function(x) log2(x + 0.5) #calculates Wald b values as log2 w/0.5 offset
+      ) 
+
+passed <- so[["filter_df"]][["target_id"]] #gene ids that passed the abundance filter above
+#for future generation of objects with just peribacillus or just microbacterium 
+```
+
+What about adding a variable for the amount of CHCA left in the sample???
+
+```{r make-base-sleuth-object}
+so.blank <- sleuth_prep(s2c,
+  extra_bootstrap_summary = TRUE,
+  read_bootstrap_tpm = TRUE,
+  target_mapping = t2g,
+  filter_fun = function(x) {
+    basic_filter(x, 100, 0.166)
+  },
+  transformation_function = function(x) log2(x + 0.5)
+)
+# fit the blank object fit with percent mapped to peri
+so.blank <- sleuth_fit(so.blank, ~p.mapped, "peri.mapped")
+so.linear <- so.blank
+so.log <- so.blank
+so.inverse.log <- so.blank
+```
+
+
+#Basic analysis
+
+Sleuth compares everything to the first thing in your data table, alphabetically. 
+If you have a dataset of C06h, C24h, E06h, E24h, it will compare everything to control at 6 hours. 
+Which could be valid! 
+Then you get changes over time (C06 vs C24) as well as in response to exposure (C06 vs E06, C06 vs E24). 
+If you use C6, it will alphabetize things as C24, C6
+
+```{r simplest-model}
+so <- so.blank
+so <- sleuth_fit(so, ~1, "reduced")
+so <- sleuth_fit(so, ~condition, "full")
+so <- sleuth_lrt(so, "reduced", "full")
+
+```
+
+
+Look at the models
+
+```{r sleuth-live}
+models(so)
+```
+
+```{r add-wt}
+so <- sleuth_wt(so, "conditionExposed_72")
+so <- sleuth_wt(so, "conditionExposed_24")
+so <- sleuth_wt(so, "conditionExposed_06")
+so <- sleuth_wt(so, "conditionControl_72")
+so <- sleuth_wt(so, "conditionControl_24")
+sleuth_live(so)
+```
+
+
+Let's see the results - prints the 20 most significant differentially expressed genes.
+```{r}
+sleuth_table <- sleuth_results(so, "reduced:full", "lrt", show_all = TRUE)
+sleuth_significant <- dplyr::filter(sleuth_table, qval <= 0.05)
+head(sleuth_significant, 20)
+write_csv(sleuth_significant, file = "sleuth_q05_all.csv") ## UPDATE NAME
+```
+
+Plot the bootstraps if a gene of interest (est counts)
+```{r}
+plot_bootstrap(so, "OBGMNA_12315", units = "est_counts", color_by = "condition")
+```
+
+Plot the bootstraps if a gene of interest (tpm counts)
+```{r}
+plot_bootstrap(so, "OBGMNA_12315", units = "tpm", color_by = "condition")
+```
+
+
+
+#Modeling gene response
+
+```{r test-simple-model}
+so.condition <- so.blank
+so.condition <- sleuth_fit(so.condition, ~p.mapped, "peri.mapped")
+so.condition <- sleuth_fit(so.condition, ~ p.mapped * condition, "full")
+so.condition <- sleuth_lrt(so.condition, "peri.mapped", "full")
+so.condition <- sleuth_wt(so.condition, "conditionExposed_72")
+so.condition <- sleuth_wt(so.condition, "conditionExposed_24")
+so.condition <- sleuth_wt(so.condition, "conditionExposed_06")
+so.condition <- sleuth_wt(so.condition, "conditionControl_72")
+so.condition <- sleuth_wt(so.condition, "conditionControl_24")
+sleuth_live(so.condition)
+```
+
+```{r test-simple-model}
+so.condition <- so.blank
+so.condition <- sleuth_fit(so.condition, ~p.mapped, "peri.mapped")
+so.condition <- sleuth_fit(so.condition, ~ p.mapped * condition, "full")
+so.condition <- sleuth_lrt(so.condition, "peri.mapped", "full")
+so.condition <- sleuth_wt(so.condition, "conditionExposed_72")
+so.condition <- sleuth_wt(so.condition, "conditionExposed_24")
+so.condition <- sleuth_wt(so.condition, "conditionExposed_06")
+so.condition <- sleuth_wt(so.condition, "conditionControl_72")
+so.condition <- sleuth_wt(so.condition, "conditionControl_24")
+sleuth_live(so.condition)
+```
+
+```{r model-mappedxmetab}
+so.mappedxmetab <- so.blank
+so.mappedxmetab <- sleuth_fit(so.mappedxmetab, ~ p.mapped * chca.metabolized, "full")
+so.mappedxmetab <- sleuth_lrt(so.mappedxmetab, "peri.mapped", "full")
+so.mappedxmetab <- sleuth_wt(so.mappedxmetab, "chca.metabolized")
+so.mappedxmetab <- sleuth_wt(so.mappedxmetab, "p.mapped")
+so.mappedxmetab <- sleuth_wt(so.mappedxmetab, "p.mapped:chca.metabolized")
+sleuth_live(so.mappedxmetab)
+```
+
+
+```{r model-mappedxcondition}
+so.mappedxcondition <- so.blank
+so.mappedxcondition <- sleuth_fit(so.mappedxcondition, ~p.mapped, "peri.mapped")
+so.mappedxcondition <- sleuth_fit(so.mappedxcondition, ~ p.mapped * condition, "full")
+so.mappedxcondition <- sleuth_lrt(so.mappedxcondition, "peri.mapped", "full")
+so.mappedxcondition <- sleuth_wt(so.mappedxcondition, "conditionControl_24")
+so.mappedxcondition <- sleuth_wt(so.mappedxcondition, "conditionControl_72")
+so.mappedxcondition <- sleuth_wt(so.mappedxcondition, "conditionExposed_06")
+so.mappedxcondition <- sleuth_wt(so.mappedxcondition, "conditionExposed_24")
+so.mappedxcondition <- sleuth_wt(so.mappedxcondition, "conditionExposed_72")
+so.mappedxcondition <- sleuth_wt(so.mappedxcondition, "p.mapped:conditionControl_24")
+so.mappedxcondition <- sleuth_wt(so.mappedxcondition, "p.mapped:conditionControl_72")
+so.mappedxcondition <- sleuth_wt(so.mappedxcondition, "p.mapped:conditionExposed_06")
+so.mappedxcondition <- sleuth_wt(so.mappedxcondition, "p.mapped:conditionExposed_24")
+so.mappedxcondition <- sleuth_wt(so.mappedxcondition, "p.mapped:conditionExposed_72")
+
+sleuth_live(so.mappedxcondition)
+```
+
+
+```{r model-mappedxlogmetab}
+so.mappedxlogmetab <- so.blank
+so.mappedxlogmetab <- sleuth_fit(
+  so.mappedxlogmetab,
+  ~ p.mapped * I(log(chca.metabolized + 0.001)),
+  "full"
+)
+so.mappedxlogmetab <- sleuth_lrt(so.mappedxlogmetab, "peri.mapped", "full")
+so.mappedxlogmetab <- sleuth_wt(so.mappedxlogmetab, "I(log(chca.metabolized + 0.001))")
+so.mappedxlogmetab <- sleuth_wt(so.mappedxlogmetab, "p.mapped")
+so.mappedxlogmetab <- sleuth_wt(so.mappedxlogmetab, "p.mapped:I(log(chca.metabolized + 0.001))")
+
+sleuth_live(so.mappedxlogmetab)
+```
+
+
+```{r model-mappedxneglogmetab}
+so.mappedxneglogmetab <- so.blank
+so.mappedxneglogmetab <- sleuth_fit(
+  so.mappedxneglogmetab,
+  ~ p.mapped * I(-log(chca.metabolized + 0.001)),
+  "full"
+)
+so.mappedxneglogmetab <- sleuth_lrt(so.mappedxneglogmetab, "peri.mapped", "full")
+so.mappedxneglogmetab <- sleuth_wt(so.mappedxneglogmetab, "I(-log(chca.metabolized + 0.001))")
+so.mappedxneglogmetab <- sleuth_wt(so.mappedxneglogmetab, "p.mapped")
+so.mappedxneglogmetab <- sleuth_wt(so.mappedxneglogmetab, "p.mapped:I(-log(chca.metabolized + 0.001))")
+
+sleuth_live(so.mappedxneglogmetab)
+```
+
+
+```{r model-mappedxinverse-log-metab}
+so.mappedxinvlogmetab <- so.blank
+so.mappedxinvlogmetab <- sleuth_fit(
+  so.mappedxinvlogmetab,
+  ~ p.mapped * I(1 / (log(chca.metabolized + 0.001))),
+  "full"
+)
+so.mappedxinvlogmetab <- sleuth_lrt(so.mappedxinvlogmetab, "peri.mapped", "full")
+so.mappedxinvlogmetab <- sleuth_wt(so.mappedxinvlogmetab, "I(1/(log(chca.metabolized + 0.001)))")
+so.mappedxinvlogmetab <- sleuth_wt(so.mappedxinvlogmetab, "p.mapped")
+so.mappedxinvlogmetab <- sleuth_wt(so.mappedxinvlogmetab, "p.mapped:I(1/(log(chca.metabolized + 0.001)))")
+
+sleuth_live(so.mappedxinvlogmetab)
+```
+
+
+```{r model-mappedxtanmetab}
+so.mappedxtanmetab <- so.blank
+so.mappedxtanmetab <- sleuth_fit(
+  so.mappedxtanmetab,
+  ~ p.mapped * I(tan(chca.metabolized + 0.001)),
+  "full"
+)
+so.mappedxtanmetab <- sleuth_lrt(so.mappedxtanmetab, "peri.mapped", "full")
+so.mappedxtanmetab <- sleuth_wt(so.mappedxtanmetab, "I(tan(chca.metabolized + 0.001))")
+so.mappedxtanmetab <- sleuth_wt(so.mappedxtanmetab, "p.mapped")
+so.mappedxtanmetab <- sleuth_wt(so.mappedxtanmetab, "p.mapped:I(tan(chca.metabolized + 0.001))")
+
+sleuth_live(so.mappedxtanmetab)
+```
+
+
+#Peribacillus genes only 
+
+Peribacillus
+```{r make-peri-object}
+p.targets <- readLines("/mnt/work-drive/kira/dual-transcriptome/p-targets.csv") # gene ids for peribacterium
+intersect.p <- intersect(passed, p.targets) # a vector of peribacterium genes that pass the abundance filter
+
+so.peri.100 <- sleuth_prep(s2c,
+  target_mapping = t2g.peri,
+  extra_bootstrap_summary = TRUE,
+  read_bootstrap_tpm = TRUE,
+  filter_target_id = intersect.p, # filter to the intersect gene set
+  transformation_function = function(x) log2(x + 0.1) # calculates Wald b values as log2 w/0.05 offset
+)
+```
+
+LRT test
+Fit full and reduced models for metadata variable 'condition' for the LRT test
+```{r}
+so.peri.100 <- sleuth_fit(so.peri.100, ~condition, "condition") # Fit the full model (time_exposure)
+so.peri.100 <- sleuth_fit(so.peri.100, ~1, "reduced") # Fit the reduced model
+so.peri.100 <- sleuth_fit(so.peri.100, ~p.peri.mapped, "p.peri.mapped")
+so.peri.100 <- sleuth_fit(so.peri.100, ~p.mapped, "p.mapped")
+so.peri.100 <- sleuth_fit(so.peri.100, ~p.mapped.diff, "p.mapped.diff")
+so.peri.100 <- sleuth_fit(so.peri.100, ~rank.range, "rank.range")
+so.peri.100 <- sleuth_fit(so.peri.100, ~rank.abund, "rank.abund")
+so.peri.100 <- sleuth_lrt(so.peri.100, "reduced", "condition") # Compare the full and reduced models to see differential expression, using the lrt test
+so.peri.100 <- sleuth_lrt(so.peri.100, "reduced", "p.peri.mapped") # Compare the full and reduced models to see differential expression, using the lrt test
+```
+Genes removed by any of the LOESS fit for these models: PBUTOS_05869, PBUTOS_06257, PBUTOS_06261, PBUTOS_06266, PBUTOS_06269, PBUTOS_06271, PBUTOS_00496, PBUTOS_00672
+
+```{r}
+so.peri.100 <- sleuth_fit(so.peri.100, ~ condition + p.peri.mapped, "full")
+so.peri.100 <- sleuth_lrt(so.peri.100, "p.peri.mapped", "full")
+
+dir.create("peri-stats")
+sleuth_table <- sleuth_results(so.peri.100, "p.peri.mapped:full", "lrt", show_all = FALSE)
+sleuth_significant <- dplyr::filter(sleuth_table, qval <= 0.05)
+write_csv(sleuth_table, "peri-stats/peri_p.peri.mapped_lrt.csv")
+head(sleuth_significant, 20)
+```
+
+```{r}
+sleuth_live(so.peri.100)
+```
+
+```{r}
+so.peri.100 <- sleuth_wt(so.peri.100, "conditionControl_24")
+so.peri.100 <- sleuth_wt(so.peri.100, "conditionControl_72")
+so.peri.100 <- sleuth_wt(so.peri.100, "conditionExposed_06")
+so.peri.100 <- sleuth_wt(so.peri.100, "conditionExposed_24")
+so.peri.100 <- sleuth_wt(so.peri.100, "conditionExposed_72")
+
+# Compare the full and reduced models to see differential expression, using the Wald test, Control_06 as the baseline
+```
+Print Wald Test results to file. I'm re-ordering and adding q and b value indexes, since I have extra metadata in my mapping file.
+```{r}
+sleuth_table <- sleuth_results(so.peri.100, "conditionControl_24", "wt", show_all = TRUE)
+sto <- sleuth_table %>% mutate(qval.index = qval, b.index = b)
+stp <- sto[, c(1, 2, 20, 21, 3:19)]
+sleuth_significant <- dplyr::filter(stp, qval <= 0.05)
+write_csv(sleuth_significant, file = "peri-stats/sleuth_peri100_wt_C24_q05.csv")
+write_csv(stp, file = "peri-stats/sleuth_peri100_wt_C24.csv")
+
+sleuth_table <- sleuth_results(so.peri.100, "conditionControl_72", "wt", show_all = TRUE)
+sto <- sleuth_table %>% mutate(qval.index = qval, b.index = b)
+stp <- sto[, c(1, 2, 20, 21, 3:19)]
+sleuth_significant <- dplyr::filter(stp, qval <= 0.05)
+write_csv(sleuth_significant, file = "peri-stats/sleuth_peri100_wt_C72_q05.csv")
+write_csv(stp, file = "peri-stats/sleuth_peri100_wt_C72.csv")
+
+sleuth_table <- sleuth_results(so.peri.100, "conditionExposed_06", "wt", show_all = TRUE)
+sto <- sleuth_table %>% mutate(qval.index = qval, b.index = b)
+stp <- sto[, c(1, 2, 20, 21, 3:19)]
+sleuth_significant <- dplyr::filter(stp, qval <= 0.05)
+write_csv(sleuth_significant, file = "peri-stats/sleuth_peri100_wt_E06_q05.csv")
+write_csv(stp, file = "peri-stats/sleuth_peri100_wt_E06.csv")
+
+sleuth_table <- sleuth_results(so.peri.100, "conditionExposed_24", "wt", show_all = TRUE)
+sto <- sleuth_table %>% mutate(qval.index = qval, b.index = b)
+stp <- sto[, c(1, 2, 20, 21, 3:19)]
+sleuth_significant <- dplyr::filter(stp, qval <= 0.05)
+write_csv(sleuth_significant, file = "peri-stats/sleuth_peri100_wt_E24_q05.csv")
+write_csv(stp, file = "peri-stats/sleuth_peri100_wt_E24.csv")
+
+sleuth_table <- sleuth_results(so.peri.100, "conditionExposed_72", "wt", show_all = TRUE)
+sto <- sleuth_table %>% mutate(qval.index = qval, b.index = b)
+stp <- sto[, c(1, 2, 20, 21, 3:19)]
+sleuth_significant <- dplyr::filter(stp, qval <= 0.05)
+head(sleuth_significant, 20)
+write_csv(sleuth_significant, file = "peri-stats/sleuth_peri100_wt_E72_q05.csv")
+write_csv(stp, file = "peri-stats/sleuth_peri100_wt_E72.csv")
+```
+
+
+```{r}
+# generate tables of significantly up or downregulated genes at each condition
+dir.create("peri-up-down")
+sleuth_table <- sleuth_results(so.peri.100, "conditionControl_24", "wt", show_all = TRUE)
+sto <- sleuth_table %>% mutate(qval.index = qval, b.index = b)
+stp <- sto[, c(1, 2, 20, 21, 3:19)]
+stp.bpos.c24 <- stp %>% filter(qval <= 0.05 & b >= 0)
+stp.bneg.c24 <- stp %>% filter(qval <= 0.05 & b <= 0)
+write_csv(stp.bpos.c24, file = "peri-up-down/peri_bpos_c24.csv")
+write_csv(stp.bneg.c24, file = "peri-up-down/peri_bneg_c24.csv")
+
+sleuth_table <- sleuth_results(so.peri.100, "conditionControl_72", "wt", show_all = TRUE)
+sto <- sleuth_table %>% mutate(qval.index = qval, b.index = b)
+stp <- sto[, c(1, 2, 20, 21, 3:19)]
+stp.bpos.c72 <- stp %>% filter(qval <= 0.05 & b >= 0)
+stp.bneg.c72 <- stp %>% filter(qval <= 0.05 & b <= 0)
+write_csv(stp.bpos.c72, file = "peri-up-down/peri_bpos_c72.csv")
+write_csv(stp.bneg.c72, file = "peri-up-down/peri_bneg_c72.csv")
+
+sleuth_table <- sleuth_results(so.peri.100, "conditionExposed_06", "wt", show_all = TRUE)
+sto <- sleuth_table %>% mutate(qval.index = qval, b.index = b)
+stp <- sto[, c(1, 2, 20, 21, 3:19)]
+stp.bpos.e06 <- stp %>% filter(qval <= 0.05 & b >= 0)
+stp.bneg.e06 <- stp %>% filter(qval <= 0.05 & b <= 0)
+write_csv(stp.bpos.e06, file = "peri-up-down/peri_bpos_e06.csv")
+write_csv(stp.bneg.e06, file = "peri-up-down/peri_bneg_e06.csv")
+
+sleuth_table <- sleuth_results(so.peri.100, "conditionExposed_24", "wt", show_all = TRUE)
+sto <- sleuth_table %>% mutate(qval.index = qval, b.index = b)
+stp <- sto[, c(1, 2, 20, 21, 3:19)]
+stp.bpos.e24 <- stp %>% filter(qval <= 0.05 & b >= 0)
+stp.bneg.e24 <- stp %>% filter(qval <= 0.05 & b <= 0)
+write_csv(stp.bpos.e24, file = "peri-up-down/peri_bpos_e24.csv")
+write_csv(stp.bneg.e24, file = "peri-up-down/peri_bneg_e24.csv")
+
+sleuth_table <- sleuth_results(so.peri.100, "conditionExposed_72", "wt", show_all = TRUE)
+sto <- sleuth_table %>% mutate(qval.index = qval, b.index = b)
+stp <- sto[, c(1, 2, 20, 21, 3:19)]
+stp.bpos.e72 <- stp %>% filter(qval <= 0.05 & b >= 0)
+stp.bneg.e72 <- stp %>% filter(qval <= 0.05 & b <= 0)
+write_csv(stp.bpos.e72, file = "peri-up-down/peri_bpos_e72.csv")
+write_csv(stp.bneg.e72, file = "peri-up-down/peri_bneg_e72.csv")
+```
+
+Find genes that are only up or down regulated with certain pairwise comparisons
+```{r}
+peri.24h.posb.Eonly <- anti_join(stp.bpos.e24, stp.bpos.c24, join_by("target_id"))
+peri.24h.posb.Conly <- anti_join(stp.bpos.c24, stp.bpos.e24, join_by("target_id"))
+peri.24h.negb.Eonly <- anti_join(stp.bneg.e24, stp.bneg.c24, join_by("target_id"))
+peri.24h.negb.Conly <- anti_join(stp.bpos.c24, stp.bneg.e24, join_by("target_id"))
+peri.72h.posb.Eonly <- anti_join(stp.bpos.e72, stp.bpos.c72, join_by("target_id"))
+peri.72h.posb.Conly <- anti_join(stp.bpos.c72, stp.bpos.e72, join_by("target_id"))
+peri.72h.negb.Eonly <- anti_join(stp.bneg.e72, stp.bneg.c72, join_by("target_id"))
+peri.72h.negb.Conly <- anti_join(stp.bpos.c72, stp.bneg.e72, join_by("target_id"))
+peri.E06v24.posb.06only <- anti_join(stp.bpos.e06, stp.bpos.e24, join_by("target_id"))
+peri.E06v24.posb.24only <- anti_join(stp.bpos.e24, stp.bpos.e06, join_by("target_id"))
+peri.E06v24.negb.06only <- anti_join(stp.bneg.e06, stp.bneg.e24, join_by("target_id"))
+peri.E06v24.negb.24only <- anti_join(stp.bneg.e24, stp.bneg.e06, join_by("target_id"))
+peri.E24v72.posb.24only <- anti_join(stp.bpos.e24, stp.bpos.e72, join_by("target_id"))
+peri.E24v72.posb.72only <- anti_join(stp.bpos.e72, stp.bpos.e24, join_by("target_id"))
+peri.E24v72.negb.24only <- anti_join(stp.bneg.e24, stp.bneg.e72, join_by("target_id"))
+peri.E24v72.negb.72only <- anti_join(stp.bneg.e72, stp.bneg.e24, join_by("target_id"))
+```
+
+```{r}
+dir.create("peri-up-down-compare")
+write_csv(peri.24h.posb.Eonly, file = "peri-up-down-compare/peri.24h.posb.Eonly.csv")
+write_csv(peri.24h.posb.Conly, file = "peri-up-down-compare/peri.24h.posb.Conly.csv")
+write_csv(peri.24h.negb.Eonly, file = "peri-up-down-compare/peri.24h.negb.Eonly.csv")
+write_csv(peri.24h.negb.Conly, file = "peri-up-down-compare/peri.24h.negb.Conly.csv")
+write_csv(peri.72h.posb.Eonly, file = "peri-up-down-compare/peri.72h.posb.Eonly.csv")
+write_csv(peri.72h.posb.Conly, file = "peri-up-down-compare/peri.72h.posb.Conly.csv")
+write_csv(peri.72h.negb.Eonly, file = "peri-up-down-compare/peri.72h.negb.Eonly.csv")
+write_csv(peri.72h.negb.Conly, file = "peri-up-down-compare/peri.72h.negb.Conly.csv")
+write_csv(peri.E06v24.posb.06only, file = "peri-up-down-compare/peri.E06v24.posb.06only.csv")
+write_csv(peri.E06v24.posb.24only, file = "peri-up-down-compare/peri.E06v24.posb.24only.csv")
+write_csv(peri.E06v24.negb.06only, file = "peri-up-down-compare/peri.E06v24.negb.06only.csv")
+write_csv(peri.E06v24.negb.24only, file = "peri-up-down-compare/peri.E06v24.negb.24only.csv")
+write_csv(peri.E24v72.posb.24only, file = "peri-up-down-compare/peri.E24v72.posb.24only.csv")
+write_csv(peri.E24v72.posb.72only, file = "peri-up-down-compare/peri.E24v72.posb.72only.csv")
+write_csv(peri.E24v72.negb.24only, file = "peri-up-down-compare/peri.E24v72.negb.24only.csv")
+write_csv(peri.E24v72.negb.72only, file = "peri-up-down-compare/peri.E24v72.negb.72only.csv")
+```
+
+Find and print intersect sets in pairwise comparisons
+```{r}
+peri.24h.posb.CEintersect <- semi_join(stp.bpos.e24, stp.bpos.c24, join_by("target_id"))
+peri.24h.negb.CEintersect <- semi_join(stp.bneg.e24, stp.bneg.c24, join_by("target_id"))
+peri.72h.posb.CEintersect <- semi_join(stp.bpos.e72, stp.bpos.c72, join_by("target_id"))
+peri.72h.negb.CEintersect <- semi_join(stp.bneg.e72, stp.bneg.c72, join_by("target_id"))
+
+peri.C.posb.2472intersect <- semi_join(stp.bpos.c24, stp.bpos.c72, join_by("target_id"))
+peri.C.negb.2472intersect <- semi_join(stp.bneg.c24, stp.bneg.c72, join_by("target_id"))
+
+peri.E.posb.0624intersect <- semi_join(stp.bpos.e06, stp.bpos.e24, join_by("target_id"))
+peri.E.negb.0624intersect <- semi_join(stp.bneg.e06, stp.bneg.e24, join_by("target_id"))
+peri.E.posb.2472intersect <- semi_join(stp.bpos.e24, stp.bpos.e72, join_by("target_id"))
+peri.E.negb.2472intersect <- semi_join(stp.bneg.e24, stp.bneg.e72, join_by("target_id"))
+peri.E.posb.062472intersect <- semi_join(peri.E.posb.2472intersect, stp.bpos.e06, join_by("target_id"))
+peri.E.negb.062472intersect <- semi_join(peri.E.negb.2472intersect, stp.bneg.e06, join_by("target_id"))
+
+write_csv(peri.24h.posb.CEintersect, file = "peri-up-down-compare/peri.24h.posb.CEintersect.csv")
+write_csv(peri.24h.negb.CEintersect, file = "peri-up-down-compare/peri.24h.negb.CEintersect.csv")
+write_csv(peri.72h.posb.CEintersect, file = "peri-up-down-compare/peri.72h.posb.CEintersect.csv")
+write_csv(peri.72h.negb.CEintersect, file = "peri-up-down-compare/peri.72h.negb.CEintersect.csv")
+write_csv(peri.C.posb.2472intersect, file = "peri-up-down-compare/peri.C.posb.2472intersect.csv")
+write_csv(peri.C.negb.2472intersect, file = "peri-up-down-compare/peri.C.negb.2472intersect.csv")
+write_csv(peri.E.posb.0624intersect, file = "peri-up-down-compare/peri.E.posb.0624intersect.csv")
+write_csv(peri.E.negb.0624intersect, file = "peri-up-down-compare/peri.E.negb.0624intersect.csv")
+write_csv(peri.E.posb.2472intersect, file = "peri-up-down-compare/peri.E.posb.2472intersect.csv")
+write_csv(peri.E.negb.2472intersect, file = "peri-up-down-compare/peri.E.negb.2472intersect.csv")
+write_csv(peri.E.posb.062472intersect, file = "peri-up-down-compare/peri.E.posb.062472intersect.csv")
+write_csv(peri.E.negb.062472intersect, file = "peri-up-down-compare/peri.E.negb.062472intersect.csv")
+```
+
+
+
+
+```{r}
+sleuth_live(so)
+```
+
+okay basically everything is differentially expressed (everything but one gene). time massive driving factor. try pairwise comparisons and filtering out low abundance transcripts
