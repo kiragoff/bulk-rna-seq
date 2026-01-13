@@ -146,7 +146,6 @@ so <- so.blank
 so <- sleuth_fit(so, ~1, "reduced")
 so <- sleuth_fit(so, ~condition, "full")
 so <- sleuth_lrt(so, "reduced", "full")
-
 ```
 
 
@@ -167,7 +166,7 @@ sleuth_live(so)
 
 
 Let's see the results - prints the 20 most significant differentially expressed genes.
-```{r}
+```{r output-results}
 sleuth_table <- sleuth_results(so, "reduced:full", "lrt", show_all = TRUE)
 sleuth_significant <- dplyr::filter(sleuth_table, qval <= 0.05)
 head(sleuth_significant, 20)
@@ -175,12 +174,12 @@ write_csv(sleuth_significant, file = "sleuth_q05_all.csv") ## UPDATE NAME
 ```
 
 Plot the bootstraps if a gene of interest (est counts)
-```{r}
+```{r plost-bootstraps-est-counts}
 plot_bootstrap(so, "OBGMNA_12315", units = "est_counts", color_by = "condition")
 ```
 
 Plot the bootstraps if a gene of interest (tpm counts)
-```{r}
+```{r plot-bootstraps-tpm}
 plot_bootstrap(so, "OBGMNA_12315", units = "tpm", color_by = "condition")
 ```
 
@@ -327,7 +326,7 @@ so.peri.100 <- sleuth_prep(s2c,
 
 LRT test
 Fit full and reduced models for metadata variable 'condition' for the LRT test
-```{r}
+```{r peri-models}
 so.peri.100 <- sleuth_fit(so.peri.100, ~condition, "condition") # Fit the full model (time_exposure)
 so.peri.100 <- sleuth_fit(so.peri.100, ~1, "reduced") # Fit the reduced model
 so.peri.100 <- sleuth_fit(so.peri.100, ~p.peri.mapped, "p.peri.mapped")
@@ -340,7 +339,7 @@ so.peri.100 <- sleuth_lrt(so.peri.100, "reduced", "p.peri.mapped") # Compare the
 ```
 Genes removed by any of the LOESS fit for these models: PBUTOS_05869, PBUTOS_06257, PBUTOS_06261, PBUTOS_06266, PBUTOS_06269, PBUTOS_06271, PBUTOS_00496, PBUTOS_00672
 
-```{r}
+```{r peri-models-stats}
 so.peri.100 <- sleuth_fit(so.peri.100, ~ condition + p.peri.mapped, "full")
 so.peri.100 <- sleuth_lrt(so.peri.100, "p.peri.mapped", "full")
 
@@ -351,11 +350,11 @@ write_csv(sleuth_table, "peri-stats/peri_p.peri.mapped_lrt.csv")
 head(sleuth_significant, 20)
 ```
 
-```{r}
+```{r sleuth-live}
 sleuth_live(so.peri.100)
 ```
 
-```{r}
+```{r wt}
 so.peri.100 <- sleuth_wt(so.peri.100, "conditionControl_24")
 so.peri.100 <- sleuth_wt(so.peri.100, "conditionControl_72")
 so.peri.100 <- sleuth_wt(so.peri.100, "conditionExposed_06")
@@ -365,7 +364,7 @@ so.peri.100 <- sleuth_wt(so.peri.100, "conditionExposed_72")
 # Compare the full and reduced models to see differential expression, using the Wald test, Control_06 as the baseline
 ```
 Print Wald Test results to file. I'm re-ordering and adding q and b value indexes, since I have extra metadata in my mapping file.
-```{r}
+```{r output-wt}
 sleuth_table <- sleuth_results(so.peri.100, "conditionControl_24", "wt", show_all = TRUE)
 sto <- sleuth_table %>% mutate(qval.index = qval, b.index = b)
 stp <- sto[, c(1, 2, 20, 21, 3:19)]
@@ -404,7 +403,7 @@ write_csv(stp, file = "peri-stats/sleuth_peri100_wt_E72.csv")
 ```
 
 
-```{r}
+```{r make-differential-tables}
 # generate tables of significantly up or downregulated genes at each condition
 dir.create("peri-up-down")
 sleuth_table <- sleuth_results(so.peri.100, "conditionControl_24", "wt", show_all = TRUE)
@@ -449,7 +448,7 @@ write_csv(stp.bneg.e72, file = "peri-up-down/peri_bneg_e72.csv")
 ```
 
 Find genes that are only up or down regulated with certain pairwise comparisons
-```{r}
+```{r find-unique-pairwise}
 peri.24h.posb.Eonly <- anti_join(stp.bpos.e24, stp.bpos.c24, join_by("target_id"))
 peri.24h.posb.Conly <- anti_join(stp.bpos.c24, stp.bpos.e24, join_by("target_id"))
 peri.24h.negb.Eonly <- anti_join(stp.bneg.e24, stp.bneg.c24, join_by("target_id"))
@@ -468,7 +467,7 @@ peri.E24v72.negb.24only <- anti_join(stp.bneg.e24, stp.bneg.e72, join_by("target
 peri.E24v72.negb.72only <- anti_join(stp.bneg.e72, stp.bneg.e24, join_by("target_id"))
 ```
 
-```{r}
+```{r write-unique-pairwise}
 dir.create("peri-up-down-compare")
 write_csv(peri.24h.posb.Eonly, file = "peri-up-down-compare/peri.24h.posb.Eonly.csv")
 write_csv(peri.24h.posb.Conly, file = "peri-up-down-compare/peri.24h.posb.Conly.csv")
@@ -489,7 +488,7 @@ write_csv(peri.E24v72.negb.72only, file = "peri-up-down-compare/peri.E24v72.negb
 ```
 
 Find and print intersect sets in pairwise comparisons
-```{r}
+```{r pairwise-intersects}
 peri.24h.posb.CEintersect <- semi_join(stp.bpos.e24, stp.bpos.c24, join_by("target_id"))
 peri.24h.negb.CEintersect <- semi_join(stp.bneg.e24, stp.bneg.c24, join_by("target_id"))
 peri.72h.posb.CEintersect <- semi_join(stp.bpos.e72, stp.bpos.c72, join_by("target_id"))
@@ -519,11 +518,3 @@ write_csv(peri.E.posb.062472intersect, file = "peri-up-down-compare/peri.E.posb.
 write_csv(peri.E.negb.062472intersect, file = "peri-up-down-compare/peri.E.negb.062472intersect.csv")
 ```
 
-
-
-
-```{r}
-sleuth_live(so)
-```
-
-okay basically everything is differentially expressed (everything but one gene). time massive driving factor. try pairwise comparisons and filtering out low abundance transcripts
