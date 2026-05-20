@@ -1,0 +1,221 @@
+---
+title: "RNA-Seq Sleuth Analysis"
+output:
+  html_document:
+    toc: true
+    toc_depth: 3
+---
+
+```{r setup}
+rm(list = ls())
+
+library(sleuth)
+library(tidyverse)
+library(data.table)
+library(ggplot2)
+
+options(mc.cores = parallel::detectCores() - 1)
+set.seed(123)
+```
+
+# 1. Define directories
+
+```{r}
+base_dir <- "/mnt/work-drive/kira/dual-transcriptome/sleuth-all"
+setwd(base_dir)
+
+output_dir <- file.path(base_dir, "output")
+dir.create(output_dir, showWarnings = FALSE, recursive = TRUE)
+```
+
+# 2. Import data
+
+```{r}
+sample_id <- dir(file.path(base_dir, "all"))
+kal_dirs <- file.path(base_dir, "all", sample_id)
+
+s2c <- read.csv("meta.csv") %>%
+  mutate(path = kal_dirs)
+
+s2c$condition <- factor(s2c$condition,
+  levels = c(
+    "Control_06", "Exposed_06",
+    "Control_24", "Exposed_24",
+    "Control_72", "Exposed_72"
+  )
+)
+
+t2g <- fread("t2g-full.tsv")
+t2g.peri <- fread("t2g-peri.tsv")
+```
+
+
+# 3. Build Sleuth objects
+
+```{r full-object}
+transformation_fn <- function(x) log2(x + 0.5)
+
+so <- sleuth_prep(
+  s2c,
+  target_mapping = t2g,
+  extra_bootstrap_summary = TRUE,
+  read_bootstrap_tpm = TRUE,
+  filter_fun = function(x) basic_filter(x, 100, 0.166),
+  transformation_function = transformation_fn
+)
+
+passed <- so[["filter_df"]][["target_id"]]
+saveRDS(so, file.path(output_dir, "so_global.rds"))
+```
+
+
+```{r peri-object}
+p.targets <- readLines("p-targets.csv")
+peri_passed <- intersect(passed, p.targets)
+transformation_fn <- function(x) log2(x + 0.5)
+
+so.peri <- sleuth_prep(
+  s2c,
+  target_mapping = t2g.peri,
+  filter_target_id = peri_passed,
+  extra_bootstrap_summary = TRUE,
+  read_bootstrap_tpm = TRUE,
+  transformation_function = transformation_fn
+)
+```
+
+# 4. Models and contrasts
+
+```{r fit-models}
+so.peri <- sleuth_fit(so.peri, ~1, "reduced")
+so.peri <- sleuth_fit(so.peri, ~ 0 + condition, "full")
+so.peri <- sleuth_lrt(so.peri, "reduced", "full")
+```
+
+
+```{r base-lrt-results}
+peri_results <- sleuth_results(so.peri, "reduced:full", "lrt", show_all = TRUE)
+
+dir.create(file.path(output_dir, "peri"), showWarnings = FALSE)
+
+write_csv(peri_results, file.path(output_dir, "peri/peri_all_results.csv"))
+```
+
+
+```{r wald-timepoint}
+# 06h
+s2c$condition <- relevel(s2c$condition, ref = "Control_06")
+so.peri_06 <- sleuth_prep(s2c, target_mapping = t2g.peri, filter_target_id = peri_passed, 
+                          extra_bootstrap_summary = TRUE, read_bootstrap_tpm = TRUE, transformation_function = transformation_fn)
+so.peri_06 <- sleuth_fit(so.peri_06, ~condition, "full")
+so.peri_06 <- sleuth_wt(so.peri_06, "conditionExposed_06")
+
+# 24h
+s2c$condition <- relevel(s2c$condition, ref = "Control_24")
+so.peri_24 <- sleuth_prep(s2c, target_mapping = t2g.peri, filter_target_id = peri_passed, 
+                          extra_bootstrap_summary = FALSE, read_bootstrap_tpm = TRUE, transformation_function = transformation_fn)
+so.peri_24 <- sleuth_fit(so.peri_24, ~condition, "full")
+so.peri_24 <- sleuth_wt(so.peri_24, "conditionExposed_24")
+
+# 72h
+s2c$condition <- relevel(s2c$condition, ref = "Control_72")
+so.peri_72 <- sleuth_prep(s2c, target_mapping = t2g.peri, filter_target_id = peri_passed, 
+                          extra_bootstrap_summary = FALSE, read_bootstrap_tpm = TRUE, transformation_function = transformation_fn)
+so.peri_72 <- sleuth_fit(so.peri_72, ~condition, "full")
+so.peri_72 <- sleuth_wt(so.peri_72, "conditionExposed_72")
+```
+
+
+```{r}
+qcut <- 0.05
+
+# 06h results
+res_06 <- sleuth_results(so.peri_06, "conditionExposed_06", "wt", show_all = TRUE)
+write_csv(res_06,             file.path(output_dir, "peri_wt_06_all.csv"))
+write_csv(res_06 %>% filter(qval <= qcut), file.path(output_dir, "peri_wt_06_sig.csv"))
+write_csv(res_06 %>% filter(qval <= qcut & b > 0), file.path(output_dir, "peri_wt_06_up.csv"))
+write_csv(res_06 %>% filter(qval <= qcut & b < 0), file.path(output_dir, "peri_wt_06_down.csv"))
+
+# 24h results
+res_24 <- sleuth_results(so.peri_24, "conditionExposed_24", "wt", show_all = TRUE)
+write_csv(res_24,             file.path(output_dir, "peri_wt_24_all.csv"))
+write_csv(res_24 %>% filter(qval <= qcut), file.path(output_dir, "peri_wt_24_sig.csv"))
+write_csv(res_24 %>% filter(qval <= qcut & b > 0), file.path(output_dir, "peri_wt_24_up.csv"))
+write_csv(res_24 %>% filter(qval <= qcut & b < 0), file.path(output_dir, "peri_wt_24_down.csv"))
+
+# 72h results
+res_72 <- sleuth_results(so.peri_72, "conditionExposed_72", "wt", show_all = TRUE)
+write_csv(res_72,             file.path(output_dir, "peri_wt_72_all.csv"))
+write_csv(res_72 %>% filter(qval <= qcut), file.path(output_dir, "peri_wt_72_sig.csv"))
+write_csv(res_72 %>% filter(qval <= qcut & b > 0), file.path(output_dir, "peri_wt_72_up.csv"))
+write_csv(res_72 %>% filter(qval <= qcut & b < 0), file.path(output_dir, "peri_wt_72_down.csv"))
+```
+
+# 5. Visualization
+
+
+```{r interactive-sleuth-object}
+sleuth_live(so.peri)
+```
+
+
+```{r volcano-plots}
+# Plotting function
+qcut <- 0.05
+fccut <- 1
+
+make_volcano_plot <- function(results_df, timepoint_label, q_threshold = qcut, save_dir) {
+  
+  plot_data <- results_df %>% 
+    mutate(
+      neglog10q = -log10(qval + 1e-10),
+      is_significant = qval <= q_threshold
+    )
+  
+  p <- ggplot(plot_data, aes(x = b, y = neglog10q)) +
+    geom_point(aes(color = is_significant), alpha = 0.6) +
+    scale_color_manual(values = c("grey70", "darkred")) +
+    theme_minimal() +
+    labs(
+      title = paste0("Peribacillus Volcano Plot - ", timepoint_label, "h"),
+      subtitle = "Exposed vs Control",
+      x = "b-value (adj Log2FC)",
+      y = "-Log10 q-value"
+    ) +
+    theme(
+      legend.position = "none",
+      plot.title = element_text(face = "bold", size = 14),
+      axis.title = element_text(size = 11)
+    ) +
+    geom_vline(xintercept=c(-fccut, fccut),col="lightblue" )
+  
+  output_file <- file.path(save_dir, paste0("peri_", timepoint_label, "_volcano.png"))
+  ggsave(output_file, p, width = 6, height = 5, dpi = 300)
+}
+
+# Generate figures
+for (time in c("06", "24", "72")) {
+  # Read the CSV back into memory to keep this chunk completely independent
+  res_data <- read_csv(file.path(output_dir, paste0("peri_wt_", time, "_all.csv")), show_col_types = FALSE)
+  
+  make_volcano_plot(
+    results_df      = res_data,
+    timepoint_label = time,
+    q_threshold     = qcut,
+    save_dir        = output_dir
+  )
+}
+```
+
+
+```{r plot-bootstraps}
+target_gene <- "Gene_ID"
+s_measure <- "tpm" # "tpm" or "est_counts"
+
+plot_bootstrap(
+  so.peri,
+  target_gene,
+  units = s_measure,
+  color_by = "condition"
+)
+```
